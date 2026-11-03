@@ -60,6 +60,13 @@ spec:
     - name: caTrustConfigMapName
       type: string
       default: trusted-ca
+  workspaces:
+    - name: git-auth
+      description: >-
+        Optional HTTPS credentials for cloning package source (e.g. private
+        gitlab.cee.redhat.com mirrors). Same secret shape as git-clone basic-auth
+        (.gitconfig / .git-credentials, or username + password files).
+      optional: true
   results:
     - name: PACKAGES_BUILT
       description: Comma-separated list of package directories built
@@ -100,6 +107,13 @@ spec:
     - name: build-packages
       image: $(params.BUILDER_IMAGE)
       workingDir: $(params.WORKDIR_ROOT)/source
+      env:
+        - name: GIT_AUTH_PATH
+          value: $(workspaces.git-auth.path)
+      volumeMounts:
+        - mountPath: /mnt/trusted-ca
+          name: trusted-ca
+          readOnly: true
       command:
         - build-npm-packages
       args:
