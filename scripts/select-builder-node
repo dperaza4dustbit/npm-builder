@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Select which Node major is first on PATH for the rest of this shell / child processes.
+#
+# Usage (source into an entrypoint):
+#   # shellcheck source=/dev/null
+#   source "$(command -v select-builder-node)"
+#   select_builder_node 22
+#   # or from package.json engines:
+#   select_builder_node_from_engines package.json
+#
+# Also runnable (prints export lines for eval):
+#   eval "$(select-builder-node 22)"
+#   eval "$(select-builder-node --from-engines package.json)"
+
+NPM_BUILDER_NODE_ROOT="${NPM_BUILDER_NODE_ROOT:-/opt/nodejs}"
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    set -euo pipefail
+fi
+
+_select_builder_node_usage() {
+    cat <<'EOF' >&2
+Usage:
+  select_builder_node <major>                 # when sourced
+  select_builder_node_from_engines <pkg.json> # when sourced
+  select-builder-node <major>                 # prints PATH export for eval
+  select-builder-node --from-engines <file>
+EOF
+}
+
+select_builder_node() {
+    local major="${1:-}"
+    if [[ -z "${major}" || ! "${major}" =~ ^[0-9]+$ ]]; then
+        _select_builder_node_usage
+        return 2
+    fi
+
+    local bindir="${NPM_BUILDER_NODE_ROOT}/${major}/bin"
+    if [[ "${major}" == "20" ]]; then
+        # Default AppStream nodejs:20 lives on PATH already; strip any side prefix.
+        export PATH="$(echo "${PATH}" | tr ':' '\n' | grep -v "^${NPM_BUILDER_NODE_ROOT}/" | paste -sd: -)"
+        hash -r 2>/dev/null || true
+        unset npm_config_python PYTHON || true
+        echo "[select-builder-node] using default Node $(/usr/bin/node -v) (/usr/bin)" >&2
+        return 0
+    fi
+
+    if [[ ! -x "${bindir}/node" ]]; then
+        echo "[select-builder-node] Node ${major} not installed at ${bindir}/node" >&2
+        echo "[select-builder-node] available:" >&2
+        ls -d "${NPM_BUILDER_NODE_ROOT}"/*/bin/node 2>/dev/null >&2 || true
+        return 1
+    fi
+
+    export PATH="${bindir}:${PATH}"
+    # Node 22+ npm ships node-gyp that needs Python >=3.8 (UBI 8 default python3 is 3.6).
+    if [[ -x /usr/bin/python3.9 ]]; then
+        export npm_config_python=/usr/bin/python3.9
+        export PYTHON=/usr/bin/python3.9
+        echo "[select-builder-node] npm_config_python=/usr/bin/python3.9" >&2
+    else
+        echo "[select-builder-node] warning: python3.9 not found; node-gyp may fail on UBI 8" >&2
+    fi
+    hash -r 2>/dev/null || true
+    local ver
+    ver="$("${bindir}/node" -v)"
+    echo "[select-builder-node] PATH → ${bindir} (${ver})" >&2
+    local got
+    got="$(node -v)"
+    if [[ "${got}" != "${ver}" ]]; then
+        echo "[select-builder-node] error: node on PATH is ${got}, expected ${ver}" >&2
+        return 1
+    fi
+}
+
+# Parse package.json engines.node and select the minimum major (supports >=N / >N / N).
+select_builder_node_from_engines() {
+    local pkg_json="${1:-package.json}"
+    if [[ ! -f "${pkg_json}" ]]; then
+        echo "[select-builder-node] package.json not found: ${pkg_json}" >&2
+        return 1
+    fi
+    local req major
+    req="$(jq -r '.engines.node // empty' "${pkg_json}")"
+    if [[ -z "${req}" ]]; then
+        echo "[select-builder-node] no engines.node; keeping current Node $(node -v)" >&2
+        return 0
+    fi
+    major="$(
+        node -e '
+          const req = process.argv[1];
+          const m = />=?\s*(\d+)/.exec(req) || /^(\d+)/.exec(req);
+          if (!m) {
+            console.error("cannot parse engines.node:", req);
+            process.exit(2);
+          }
+          process.stdout.write(m[1]);
+        ' "${req}"
+    )"
+    echo "[select-builder-node] engines.node=${req} → major ${major}" >&2
+    select_builder_node "${major}"
+}
+
+# CLI mode when executed (not sourced): reuse the sourced helpers, then print
+# export lines for eval (including Python 3.9 for Node 22+ node-gyp).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    if [[ "${1:-}" == "--from-engines" ]]; then
+        select_builder_node_from_engines "${2:-package.json}" || exit $?
+    else
+        select_builder_node "${1:-}" || exit $?
+    fi
+    echo "export PATH=\"${PATH}\""
+    if [[ -n "${npm_config_python:-}" ]]; then
+        echo "export npm_config_python=\"${npm_config_python}\""
+        echo "export PYTHON=\"${PYTHON}\""
+    else
+        echo "unset npm_config_python PYTHON"
+    fi
+fi

@@ -11,7 +11,9 @@ downloads from `static.rust-lang.org`.
 | Tool | Source | Pinning |
 | ---- | ------ | ------- |
 | UBI 8 base | `registry.access.redhat.com/ubi8/ubi` | digest in [`baseimage.lock`](./baseimage.lock) + Containerfile `ARG BASEIMAGE` |
-| Node.js 20 LTS | AppStream `nodejs:20` module | stream `20` |
+| Node.js 20 LTS (default `PATH`) | AppStream `nodejs:20` module | stream `20` |
+| Node.js 22 (side-by-side) | AppStream `nodejs:22` via `dnf --installroot` + wrappers under `/opt/nodejs/22/bin` | stream `22`; recipes select via `select-builder-node`. Install uses `NPM_BUILDER_RELEASEVER` or major from `/etc/os-release` `VERSION_ID` (not hard-coded `8`) |
+| Python 3.9 | AppStream `python39:3.9` | used as `npm_config_python` when Node 22 is selected (node-gyp ≥11 needs ≥3.8) |
 | Go | AppStream `golang` | distro default |
 | **C/C++ (node-gyp)** | **gcc-toolset-14** (CodeReady Builder) | toolset version in [`gcc-toolset.lock`](./gcc-toolset.lock); C++20 on UBI 8 glibc |
 | **SBOM** | **Syft** from `registry.redhat.io/rh-syft-tech-preview/syft-rhel9` (digest-pinned via `SYFT_IMAGE`, same as [tssc-dev-multi-ci](https://github.com/redhat-appstudio/tssc-dev-multi-ci/blob/main/Dockerfile)) | SPDX JSON → `package/sboms/redhat.spdx.json` (same name as Python wheels) |
@@ -97,7 +99,22 @@ Local builds: `podman login registry.redhat.io` before `docker`/`podman` build.
 | `npm-publish-pulp` | Optional Pulp npm publish (deferred; Tekton step only) |
 | `build_scripts/install-gcc-toolset.sh` | Install gcc-toolset from `gcc-toolset.lock` |
 | `build_scripts/install-rust-toolset.sh` | Install + versionlock pinned rust-toolset RPMs |
+| `build_scripts/install-nodejs-side.sh` | Install an extra Node major beside default 20 (`/opt/nodejs/<N>/bin`) |
+| `select-builder-node` | Entrypoint helper: put Node 20 or 22 first on `PATH` (source or `eval "$(select-builder-node 22)"`) |
 | `hack/update-rust-toolset-lock.sh` | Refresh `rust-toolset.lock` from UBI |
+
+### Selecting Node 20 vs 22 in a recipe
+
+Default `PATH` is Node 20. For packages with `engines.node: ">=22"` (e.g. `better-sqlite3@13`):
+
+```bash
+# shellcheck source=/dev/null
+source "$(command -v select-builder-node)"
+select_builder_node_from_engines package.json
+# or: select_builder_node 22
+```
+
+`node-gyp` / `npm` then use the selected major. Prefer selecting **before** install/compile/smoke load checks.
 
 Publishing to Quay (OCI artifact) and optional Pulp are handled in **Tekton steps**.
 Package attestations are **release-phase** (like Python `rh-sign-python-wheels`); see
