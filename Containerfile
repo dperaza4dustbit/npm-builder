@@ -1,4 +1,4 @@
-# TL npm factory builder — linux-x64, glibc (UBI8), Node 20 LTS + Go + Rust.
+# TL npm factory builder — linux-x64, glibc (UBI8), Node 20 (default) + Node 22 (side) + Go + Rust.
 # Used by Konflux build-npm-package tasks; onboarder recipes run via build-npm-package.
 # Keep ARG BASEIMAGE in sync with baseimage.lock.
 ARG BASEIMAGE=registry.access.redhat.com/ubi8/ubi@sha256:bd097b288df365aec7bad694c87036534ce94d1a4974c943f417f757f8eb2ac4
@@ -10,16 +10,18 @@ FROM ${SYFT_IMAGE} AS syft-bin
 FROM ${BASEIMAGE} AS tools
 
 LABEL maintainer="Red Hat Trusted Libraries"
-LABEL io.k8s.description="npm TL factory builder (Node 20, Go, Rust, glibc)"
+LABEL io.k8s.description="npm TL factory builder (Node 20+22, Go, Rust, glibc)"
 LABEL org.opencontainers.image.source="https://github.com/calungaproject/plumbing"
 
 ENV LC_ALL=en_US.UTF-8 \
     LANG=en_US.UTF-8 \
     LANGUAGE=en_US.UTF-8 \
     NODE_ENV=production \
-    NPM_CONFIG_UPDATE_NOTIFIER=false
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_BUILDER_NODE_ROOT=/opt/nodejs
 
 RUN dnf -y module enable nodejs:20 && \
+    dnf -y module enable python39:3.9 && \
     dnf -y install \
         --setopt install_weak_deps=0 \
         glibc-langpack-en \
@@ -29,6 +31,7 @@ RUN dnf -y module enable nodejs:20 && \
         golang \
         python3 \
         python3-pip \
+        python39 \
         ca-certificates \
         tar \
         gzip \
@@ -45,6 +48,16 @@ RUN dnf -y module enable nodejs:20 && \
         openssl-devel \
         && dnf clean all \
         && rm -rf /var/cache/dnf
+
+# Side-by-side Node 22 (AppStream module via installroot; default PATH stays Node 20).
+# Node 22's bundled node-gyp needs Python >=3.8 (walrus); select-builder-node points
+# npm_config_python at python3.9 when major 22 is selected.
+COPY build_scripts/install-nodejs-side.sh /tmp/install-nodejs-side.sh
+RUN chmod +x /tmp/install-nodejs-side.sh && \
+    /tmp/install-nodejs-side.sh 22 && \
+    rm -f /tmp/install-nodejs-side.sh && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
 
 # gcc-toolset pin: edit gcc-toolset.lock only (single source of truth).
 COPY gcc-toolset.lock build_scripts/install-gcc-toolset.sh /tmp/
@@ -84,7 +97,7 @@ FROM tools
 COPY --from=test /tmp/npm-builder-tests-ok /tmp/npm-builder-tests-ok
 
 COPY --chmod=755 scripts/shasum /usr/local/bin/shasum
-COPY --chmod=755 scripts/build-npm-package scripts/build-npm-packages scripts/collect-npm-artifacts scripts/collect-npm-package-outputs scripts/generate-npm-sbom scripts/verify-npm-sbom scripts/assess-npm-compliance scripts/lookup-npm-tl-compliance scripts/record-npm-packages-built scripts/npm-workdir-load.sh scripts/npm-publish-pulp /usr/local/bin/
+COPY --chmod=755 scripts/build-npm-package scripts/build-npm-packages scripts/collect-npm-artifacts scripts/collect-npm-package-outputs scripts/generate-npm-sbom scripts/verify-npm-sbom scripts/assess-npm-compliance scripts/lookup-npm-tl-compliance scripts/record-npm-packages-built scripts/npm-workdir-load.sh scripts/npm-publish-pulp scripts/select-builder-node /usr/local/bin/
 COPY --chmod=644 scripts/npm-workdir-env.sh /usr/local/lib/npm-builder/
 ENV NPM_BUILDER_LIB=/usr/local/lib/npm-builder
 
