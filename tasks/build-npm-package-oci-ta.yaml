@@ -14,8 +14,9 @@ metadata:
 spec:
   description: >-
     Build npm Trusted Libraries packages from onboarding recipes, generate an
-    SPDX SBOM (Syft → redhat.spdx.json), and push an OCI artifact to Quay
-    (mirrors build-python-wheels: SBOM at build; attestations at release).
+    SPDX SBOM (Syft → redhat.spdx.json, enriched with npm name/version/purl),
+    and push an OCI artifact to Quay (mirrors build-python-wheels: SBOM at
+    build; attestations at release).
     Optional Pulp Stage when PUBLISH_TO_PULP=true.
   params:
     - name: PACKAGES

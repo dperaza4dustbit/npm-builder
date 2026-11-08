@@ -9,6 +9,21 @@
 # Default: ARTIFACT_ROOT (or ./artifact)
 set -euo pipefail
 
+_npm_sbom_identity_lib() {
+    local here
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -f "${here}/lib/npm-sbom-identity.sh" ]]; then
+        echo "${here}/lib/npm-sbom-identity.sh"
+    elif [[ -f "${NPM_BUILDER_LIB:-/usr/local/lib/npm-builder}/npm-sbom-identity.sh" ]]; then
+        echo "${NPM_BUILDER_LIB:-/usr/local/lib/npm-builder}/npm-sbom-identity.sh"
+    else
+        echo "npm-sbom-identity.sh not found" >&2
+        return 1
+    fi
+}
+# shellcheck source=lib/npm-sbom-identity.sh
+source "$(_npm_sbom_identity_lib)"
+
 ARTIFACT_DIR="${1:-${ARTIFACT_ROOT:-./artifact}}"
 SBOM_REL="sboms/redhat.spdx.json"
 
@@ -68,6 +83,8 @@ for tgz in "${tgz_files[@]}"; do
     sbom_path="${pkg_dir}/${SBOM_REL}"
 
     # Scan the package tree (npm metadata + files). SPDX 2.3 JSON.
+    # Syft dir scans usually emit a DESCRIBES relationship to a path-only
+    # root package (documentDescribes is often null) — enrich from package.json.
     syft scan "dir:${pkg_dir}" \
         -o "spdx-json=${sbom_path}" \
         --quiet
@@ -76,6 +93,100 @@ for tgz in "${tgz_files[@]}"; do
         echo "[generate-npm-sbom] ERROR: syft did not write ${SBOM_REL} for ${rel}" >&2
         exit 1
     }
+
+    purl="$(npm_sbom_purl "${name}" "${version}")"
+    jq --arg name "${name}" --arg version "${version}" --arg purl "${purl}" '
+        # Keep Syft purls that already identify this package (same coords,
+        # optional ?qualifiers). Drop only conflicting purls; add bare $purl
+        # when none remain.
+        def same_npm_purl:
+            . == $purl or startswith($purl + "?");
+        def enrich:
+            .name = $name
+            | .versionInfo = $version
+            | .externalRefs = (
+                ((.externalRefs // [])
+                  | map(select(
+                      .referenceType != "purl"
+                      or ((.referenceLocator // "") | same_npm_purl)
+                    )))
+                | if any(.[];
+                    .referenceType == "purl"
+                    and ((.referenceLocator // "") | same_npm_purl))
+                  then .
+                  else . + [{
+                      referenceCategory: "PACKAGE-MANAGER",
+                      referenceType: "purl",
+                      referenceLocator: $purl
+                    }]
+                  end
+              );
+        # Prefer SPDX documentDescribes; else DOCUMENT DESCRIBES relationships
+        # (Syft dir scans often leave documentDescribes null).
+        def described_ids:
+            (
+              ((.documentDescribes // []) | map(select(type == "string")))
+              + [
+                  (.relationships // [])[]
+                  | select(
+                      (.spdxElementId // "") == "SPDXRef-DOCUMENT"
+                      and (.relationshipType // "") == "DESCRIBES"
+                      and ((.relatedSpdxElement // "") | type == "string")
+                    )
+                  | .relatedSpdxElement
+                ]
+            ) | unique;
+
+        .name = ($name + "@" + $version)
+        | if ((.packages // []) | length) == 0 then
+            .packages = [{
+                SPDXID: "SPDXRef-Package-npm-root",
+                name: $name,
+                versionInfo: $version,
+                downloadLocation: "NOASSERTION",
+                filesAnalyzed: false,
+                externalRefs: [{
+                    referenceCategory: "PACKAGE-MANAGER",
+                    referenceType: "purl",
+                    referenceLocator: $purl
+                }]
+            }]
+            | .documentDescribes = ["SPDXRef-Package-npm-root"]
+          else
+            (described_ids) as $ids
+            | if ($ids | length) == 0 then
+                error("no documentDescribes/DESCRIBES package to enrich with npm identity")
+              else
+                .packages |= map(
+                  (.SPDXID // "") as $sid
+                  | if ($ids | index($sid)) != null
+                    then enrich
+                    else .
+                    end
+                )
+                | if any(.packages[]?;
+                    (.SPDXID // "") as $sid
+                    | ($ids | index($sid)) != null
+                      and .name == $name and .versionInfo == $version)
+                  then .
+                  else error("described package(s) missing from packages[] after enrich")
+                  end
+              end
+          end
+    ' "${sbom_path}" > "${sbom_path}.next" || {
+        echo "[generate-npm-sbom] ERROR: cannot enrich SBOM for ${rel}" \
+            "(expected documentDescribes or DOCUMENT DESCRIBES; refusing packages[0] fallback)" >&2
+        rm -f "${sbom_path}.next"
+        exit 1
+    }
+    mv "${sbom_path}.next" "${sbom_path}"
+
+    # Fail closed: same SPDX-2 + identity predicate as verify-npm-sbom.
+    if ! npm_sbom_identity_ok "${sbom_path}" "${name}" "${version}"; then
+        echo "[generate-npm-sbom] ERROR: enriched SBOM missing SPDX-2 identity" \
+            "${name}@${version} (${purl}) for ${rel}" >&2
+        exit 1
+    fi
 
     # Ensure package.json files includes the SBOM path (npm pack / publish allowlist).
     jq --arg sbom "${SBOM_REL}" '

@@ -22,6 +22,7 @@ done
 
 python3 "${ROOT}/test_lookup_npm_tl_compliance.py" -v
 bash "${ROOT}/test_assess_npm_compliance.sh"
+bash "${ROOT}/test_generate_npm_sbom.sh"
 
 # Dual Node helpers only exist in the built image (or when wrappers were installed).
 if [[ -x /opt/nodejs/22/bin/node ]]; then

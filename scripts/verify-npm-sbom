@@ -1,16 +1,32 @@
 #!/usr/bin/env bash
-# Verify each collected .tgz embeds package/sboms/redhat.spdx.json (SPDX from Syft).
+# Verify each collected .tgz embeds package/sboms/redhat.spdx.json (SPDX from Syft)
+# with npm name/version or pkg:npm/… purl matching package/package.json.
 #
 # Usage: verify-npm-sbom [artifact-dir]
 # Default: ARTIFACT_ROOT (or ./artifact)
 #
-# Requires (npm-builder image): bash, find, sort, tar.
+# Requires (npm-builder image): bash, find, sort, tar, jq.
 set -euo pipefail
+
+_npm_sbom_identity_lib() {
+    local here
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -f "${here}/lib/npm-sbom-identity.sh" ]]; then
+        echo "${here}/lib/npm-sbom-identity.sh"
+    elif [[ -f "${NPM_BUILDER_LIB:-/usr/local/lib/npm-builder}/npm-sbom-identity.sh" ]]; then
+        echo "${NPM_BUILDER_LIB:-/usr/local/lib/npm-builder}/npm-sbom-identity.sh"
+    else
+        echo "npm-sbom-identity.sh not found" >&2
+        return 1
+    fi
+}
+# shellcheck source=lib/npm-sbom-identity.sh
+source "$(_npm_sbom_identity_lib)"
 
 ARTIFACT_DIR="${1:-${ARTIFACT_ROOT:-./artifact}}"
 SBOM_MEMBER="package/sboms/redhat.spdx.json"
 
-for cmd in find sort tar; do
+for cmd in find sort tar jq; do
     if ! command -v "${cmd}" >/dev/null 2>&1; then
         echo "[verify-npm-sbom] ERROR: required command not on PATH: ${cmd}" >&2
         exit 1
@@ -22,7 +38,10 @@ if [[ ! -d "${ARTIFACT_DIR}" ]]; then
     exit 1
 fi
 
-mapfile -t tarballs < <(find "${ARTIFACT_DIR}" -type f -name '*.tgz' | LC_ALL=C sort)
+tarballs=()
+while IFS= read -r f; do
+    [[ -n "${f}" ]] && tarballs+=("${f}")
+done < <(find "${ARTIFACT_DIR}" -type f -name '*.tgz' | LC_ALL=C sort)
 
 if [[ ${#tarballs[@]} -eq 0 ]]; then
     if [[ -f "${ARTIFACT_DIR}/.keep" ]]; then
@@ -35,16 +54,42 @@ fi
 
 for tgz in "${tarballs[@]}"; do
     echo "[verify-npm-sbom] checking ${tgz}"
-    # Extract the member directly (avoid tar|grep pipefail / SIGPIPE; see utils npm-common.sh).
-    tmp="$(mktemp)"
-    if ! tar -xOf "${tgz}" "${SBOM_MEMBER}" > "${tmp}" 2>/dev/null || [[ ! -s "${tmp}" ]]; then
-        rm -f "${tmp}"
-        echo "[verify-npm-sbom] missing ${SBOM_MEMBER} in ${tgz}" >&2
+    # One decompress for both members (avoid dual tar -xOf gzip passes).
+    extract_dir="$(mktemp -d)"
+    if ! tar -xzf "${tgz}" -C "${extract_dir}" "${SBOM_MEMBER}" "package/package.json" 2>/dev/null; then
+        echo "[verify-npm-sbom] missing ${SBOM_MEMBER} and/or package/package.json in ${tgz}" >&2
         echo "[verify-npm-sbom] tar -tzf listing (first 30 entries):" >&2
         tar -tzf "${tgz}" 2>&1 | head -30 >&2 || true
+        rm -rf "${extract_dir}"
         exit 1
     fi
-    rm -f "${tmp}"
+    sbom_path="${extract_dir}/${SBOM_MEMBER}"
+    pkg_path="${extract_dir}/package/package.json"
+    if [[ ! -s "${sbom_path}" ]]; then
+        rm -rf "${extract_dir}"
+        echo "[verify-npm-sbom] missing ${SBOM_MEMBER} in ${tgz}" >&2
+        exit 1
+    fi
+    if [[ ! -s "${pkg_path}" ]]; then
+        rm -rf "${extract_dir}"
+        echo "[verify-npm-sbom] missing package/package.json in ${tgz}" >&2
+        exit 1
+    fi
+    name="$(jq -r '.name // empty' "${pkg_path}")"
+    version="$(jq -r '.version // empty' "${pkg_path}")"
+    if [[ -z "${name}" || -z "${version}" ]]; then
+        rm -rf "${extract_dir}"
+        echo "[verify-npm-sbom] package.json missing name/version in ${tgz}" >&2
+        exit 1
+    fi
+    purl="$(npm_sbom_purl "${name}" "${version}")"
+    if ! npm_sbom_identity_ok "${sbom_path}" "${name}" "${version}"; then
+        rm -rf "${extract_dir}"
+        echo "[verify-npm-sbom] ${SBOM_MEMBER} missing SPDX-2 identity" \
+            "${name}@${version} (${purl}) in ${tgz}" >&2
+        exit 1
+    fi
+    rm -rf "${extract_dir}"
 done
 
 echo "[verify-npm-sbom] verified SPDX SBOM in ${#tarballs[@]} tarball(s)"

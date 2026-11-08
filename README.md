@@ -92,8 +92,8 @@ Local builds: `podman login registry.redhat.io` before `docker`/`podman` build.
 | `build-npm-package` | Run entrypoint + smoke for one manifest |
 | `build-npm-packages` | Build multiple package dirs (Tekton `PACKAGES` args) |
 | `collect-npm-artifacts` | Stage `out/*.tgz` for OCI push / optional Pulp publish |
-| `generate-npm-sbom` | Syft → SPDX JSON embedded as `package/sboms/redhat.spdx.json` (Python parity) |
-| `verify-npm-sbom` | Assess: require embedded `redhat.spdx.json` in each `.tgz` |
+| `generate-npm-sbom` | Syft → SPDX JSON embedded as `package/sboms/redhat.spdx.json`, then enrich DocumentRoot with npm `name` / `version` / `pkg:npm/…` purl from `package.json` |
+| `verify-npm-sbom` | Assess: require embedded `redhat.spdx.json` with SPDX-2 + npm name/version or purl matching `package.json` |
 | `lookup-npm-tl-compliance` | Assess helper: packument lookup for `name` + version or range (optional basic-auth for allowlisted Lightwell registry URLs) |
 | `assess-npm-compliance` | Assess: inductive L1/L2/L3 from packed `package.json` `dependencies` + `lookup-npm-tl-compliance`; write `*.tl-compliance.json` |
 | `npm-publish-pulp` | Optional Pulp npm publish (deferred; Tekton step only) |

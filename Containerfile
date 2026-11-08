@@ -98,7 +98,7 @@ COPY --from=test /tmp/npm-builder-tests-ok /tmp/npm-builder-tests-ok
 
 COPY --chmod=755 scripts/shasum /usr/local/bin/shasum
 COPY --chmod=755 scripts/build-npm-package scripts/build-npm-packages scripts/collect-npm-artifacts scripts/collect-npm-package-outputs scripts/generate-npm-sbom scripts/verify-npm-sbom scripts/assess-npm-compliance scripts/lookup-npm-tl-compliance scripts/record-npm-packages-built scripts/npm-workdir-load.sh scripts/npm-publish-pulp scripts/select-builder-node /usr/local/bin/
-COPY --chmod=644 scripts/npm-workdir-env.sh /usr/local/lib/npm-builder/
+COPY --chmod=644 scripts/npm-workdir-env.sh scripts/lib/npm-sbom-identity.sh scripts/lib/npm-sbom-identity.jq /usr/local/lib/npm-builder/
 ENV NPM_BUILDER_LIB=/usr/local/lib/npm-builder
 
 # gcc-toolset + rust-toolset + llvm-toolset under /opt/rh/* — node-gyp uses CC/CXX.
