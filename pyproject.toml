@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=78.1.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "npm-builder"
+version = "0.1.0"
+description = "Build, assess, and publish Trusted-Library-compliant npm packages for Konflux/Tekton pipelines"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+
+[dependency-groups]
+dev = [
+    "bandit>=1.9.4",
+    "pytest>=7.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+npm-builder = "npm_builder.cli:main"
+npmb = "npm_builder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+
+[tool.coverage.run]
+branch = true
+source = ["npm_builder"]
+omit = ["src/npm_builder/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 90
+exclude_also = ['if __name__ == "__main__":', "raise NotImplementedError"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+# The bash scripts under scripts/, hack/, and build_scripts/ and their tests have a separate lifecycle.
+include = ["src/**/*.py", "tests/**/*.py", "pyproject.toml"]
+extend-exclude = ["tests/test_lookup_npm_tl_compliance.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
