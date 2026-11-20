@@ -50,6 +50,15 @@ spec:
       description: When true, npm publish to Pulp Stage (requires stage secret)
       type: string
       default: "false"
+    - name: LIGHTWELL_PUBLISH_VERSION_OVERRIDE
+      description: >-
+        Version to publish instead of manifest.version (e.g.
+        "<manifest.version>-lwci.0"). Exposed to the recipe build and smoke
+        scripts so SCRATCH builds of VALIDATED packages exercise re-versioning
+        without editing the manifest. Leave empty for production builds and
+        releases.
+      type: string
+      default: ""
     - name: WORKDIR_ROOT
       description: >-
         Writable emptyDir mount for factory scratch (source checkout, build output, OCI staging)
@@ -111,6 +120,8 @@ spec:
       env:
         - name: GIT_AUTH_PATH
           value: $(workspaces.git-auth.path)
+        - name: LIGHTWELL_PUBLISH_VERSION_OVERRIDE
+          value: $(params.LIGHTWELL_PUBLISH_VERSION_OVERRIDE)
       volumeMounts:
         - mountPath: /mnt/trusted-ca
           name: trusted-ca

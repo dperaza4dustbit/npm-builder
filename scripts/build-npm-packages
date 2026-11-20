@@ -18,6 +18,9 @@ Environment:
   WORK_ROOT      Writable build scratch (default: ${WORKDIR_ROOT}/work)
   OUTPUT_ROOT    Factory tarball output (default: ${WORKDIR_ROOT}/output)
   GIT_AUTH_PATH  Optional Tekton git-auth workspace (credentials for private clones)
+  LIGHTWELL_PUBLISH_VERSION_OVERRIDE
+                 Optional version to publish instead of manifest.version; passed
+                 through to every recipe's build and smoke scripts
 EOF
 }
 
