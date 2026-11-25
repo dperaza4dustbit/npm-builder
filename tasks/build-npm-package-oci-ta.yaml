@@ -50,20 +50,26 @@ spec:
       description: When true, npm publish to Pulp Stage (requires stage secret)
       type: string
       default: "false"
-    - name: LIGHTWELL_PUBLISH_VERSION_OVERRIDE
-      description: >-
-        Version to publish instead of manifest.version (e.g.
-        "<manifest.version>-lwci.0"). Exposed to the recipe build and smoke
-        scripts so SCRATCH builds of VALIDATED packages exercise re-versioning
-        without editing the manifest. Leave empty for production builds and
-        releases.
-      type: string
-      default: ""
     - name: WORKDIR_ROOT
       description: >-
         Writable emptyDir mount for factory scratch (source checkout, build output, OCI staging)
       type: string
       default: /var/workdir
+    - name: LIGHTWELL_SCRATCH_PUBLISH_VERSION
+      description: >-
+        When non-empty, rewrite recipe manifest publish identity to this version
+        before build. apply-publish-version-override allows this only when
+        every manifest stream is validated and LIGHTWELL_BUILD_INTENT is scratch.
+        Empty skips the rewrite. Not exported as
+        LIGHTWELL_PUBLISH_VERSION_OVERRIDE, which entrypoints use for local proof.
+      type: string
+      default: ""
+    - name: LIGHTWELL_BUILD_INTENT
+      description: >-
+        scratch or release. A publish-version override is refused unless this
+        is scratch. release is the fail-closed default for RPA targets.
+      type: string
+      default: "release"
     - name: caTrustConfigMapKey
       type: string
       default: ca-bundle.crt
@@ -120,8 +126,12 @@ spec:
       env:
         - name: GIT_AUTH_PATH
           value: $(workspaces.git-auth.path)
-        - name: LIGHTWELL_PUBLISH_VERSION_OVERRIDE
-          value: $(params.LIGHTWELL_PUBLISH_VERSION_OVERRIDE)
+        - name: LIGHTWELL_SCRATCH_PUBLISH_VERSION
+          value: $(params.LIGHTWELL_SCRATCH_PUBLISH_VERSION)
+        - name: LIGHTWELL_BUILD_INTENT
+          value: $(params.LIGHTWELL_BUILD_INTENT)
+        - name: PUBLISH_TO_PULP
+          value: $(params.PUBLISH_TO_PULP)
       volumeMounts:
         - mountPath: /mnt/trusted-ca
           name: trusted-ca

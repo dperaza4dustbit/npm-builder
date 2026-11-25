@@ -75,6 +75,21 @@ spec:
       description: Writable emptyDir mount for pull / stage / push
       type: string
       default: /var/workdir
+    - name: LIGHTWELL_SCRATCH_PUBLISH_VERSION
+      description: >-
+        When non-empty, rewrite the source checkout manifests to this version
+        before assess. apply-publish-version-override allows this only when
+        every manifest stream is validated and LIGHTWELL_BUILD_INTENT is scratch.
+        Empty skips the rewrite. Not exported as
+        LIGHTWELL_PUBLISH_VERSION_OVERRIDE, which entrypoints use for local proof.
+      type: string
+      default: ""
+    - name: LIGHTWELL_BUILD_INTENT
+      description: >-
+        scratch or release. Must match the build task. A publish-version
+        override is refused unless this is scratch.
+      type: string
+      default: "release"
     - name: caTrustConfigMapKey
       type: string
       default: ca-bundle.crt
@@ -205,6 +220,10 @@ spec:
       env:
         - name: TL_NPM_REGISTRY_URL
           value: $(params.TL_NPM_REGISTRY_URL)
+        - name: LIGHTWELL_SCRATCH_PUBLISH_VERSION
+          value: $(params.LIGHTWELL_SCRATCH_PUBLISH_VERSION)
+        - name: LIGHTWELL_BUILD_INTENT
+          value: $(params.LIGHTWELL_BUILD_INTENT)
       volumeMounts:
         - mountPath: /mnt/pulp-secret
           name: pulp-secret

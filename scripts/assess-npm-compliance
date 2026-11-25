@@ -90,6 +90,9 @@ if [[ ${#PACKAGE_DIRS[@]} -gt 0 ]]; then
         echo "[assess-npm-compliance] SOURCE_ROOT/source-root required when package dirs are given" >&2
         exit 1
     fi
+    # Assess keys tarballs off manifest.version. SOURCE_DIR is this task's checkout;
+    # an empty override is a no-op inside apply-publish-version-override.
+    SOURCE_ROOT="${SOURCE_DIR}" apply-publish-version-override "${PACKAGE_DIRS[@]}"
     for pkg in "${PACKAGE_DIRS[@]}"; do
         m="${SOURCE_DIR}/${pkg}/manifest.json"
         if [[ ! -f "${m}" ]]; then

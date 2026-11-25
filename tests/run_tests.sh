@@ -21,6 +21,7 @@ for p in /opt/homebrew/opt/coreutils/libexec/gnubin /usr/local/opt/coreutils/lib
 done
 
 python3 "${ROOT}/test_lookup_npm_tl_compliance.py" -v
+bash "${ROOT}/test_apply_publish_version_override.sh"
 bash "${ROOT}/test_assess_npm_compliance.sh"
 bash "${ROOT}/test_generate_npm_sbom.sh"
 

@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Rewrite recipe manifests when LIGHTWELL_SCRATCH_PUBLISH_VERSION is set.
+# No-op when that value is empty. Recipes do not read this variable. Their
+# local proof uses LIGHTWELL_PUBLISH_VERSION_OVERRIDE, which this wrapper
+# leaves unset so a scratch CI run exercises the rewritten manifest.
+# The rewrite script lives in the recipe checkout (calunga-javascript
+# hack/manifest_publish_version.py). This wrapper is what build and assess
+# both call, and it refuses the override unless every selected manifest is
+# stream=validated and LIGHTWELL_BUILD_INTENT=scratch.
+#
+# Usage: apply-publish-version-override <pkg-dir> [<pkg-dir> ...]
+# Requires SOURCE_ROOT.
+set -euo pipefail
+
+override="${LIGHTWELL_SCRATCH_PUBLISH_VERSION:-}"
+if [[ -z "${override}" ]]; then
+    exit 0
+fi
+if [[ "${override}" =~ [[:space:]] ]]; then
+    echo "[apply-publish-version-override] ERROR: override must not contain whitespace" >&2
+    exit 1
+fi
+if [[ $# -lt 1 ]]; then
+    echo "[apply-publish-version-override] ERROR: no package dirs" >&2
+    exit 1
+fi
+if [[ -z "${SOURCE_ROOT:-}" || ! -d "${SOURCE_ROOT}" ]]; then
+    echo "[apply-publish-version-override] ERROR: SOURCE_ROOT is required when override is set" >&2
+    exit 1
+fi
+script="${SOURCE_ROOT}/hack/manifest_publish_version.py"
+if [[ ! -f "${script}" ]]; then
+    echo "[apply-publish-version-override] ERROR: missing ${script}" >&2
+    exit 1
+fi
+
+# UBI8 `python3` is 3.6.8. Run the recipe script with python3.9, which this
+# image installs for node-gyp. NPM_BUILDER_PYTHON overrides the choice. A host
+# without python3.9 falls back to python3; the script stays runnable on 3.6.
+if [[ -n "${NPM_BUILDER_PYTHON:-}" ]]; then
+    python="${NPM_BUILDER_PYTHON}"
+elif [[ -x /usr/bin/python3.9 ]]; then
+    python=/usr/bin/python3.9
+else
+    python=python3
+fi
+
+# Release targets are admitted by a ReleasePlanAdmission. Scratch is the only
+# intent allowed to reversion. An unset intent fails closed.
+intent="${LIGHTWELL_BUILD_INTENT:-}"
+if [[ "${intent}" != "scratch" ]]; then
+    echo "[apply-publish-version-override] ERROR: publish-version override requires LIGHTWELL_BUILD_INTENT=scratch (got '${intent:-unset}')" >&2
+    exit 1
+fi
+case "${PUBLISH_TO_PULP:-false}" in
+    true|True|TRUE|1)
+        echo "[apply-publish-version-override] ERROR: publish-version override cannot run with PUBLISH_TO_PULP enabled" >&2
+        exit 1
+        ;;
+esac
+
+# Validate every manifest before rewriting any of them.
+packages=()
+for pkg in "$@"; do
+    pkg="${pkg#/}"
+    packages+=("${pkg}")
+    manifest="${SOURCE_ROOT}/${pkg}/manifest.json"
+    if [[ ! -f "${manifest}" ]]; then
+        echo "[apply-publish-version-override] ERROR: missing ${manifest}" >&2
+        exit 1
+    fi
+    stream_version="$(
+        "${python}" -c 'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); print(data.get("stream") or ""); print(data.get("version") or "")' \
+            "${manifest}"
+    )"
+    stream="${stream_version%%$'\n'*}"
+    version="${stream_version#*$'\n'}"
+    if [[ "${stream}" != "validated" ]]; then
+        echo "[apply-publish-version-override] ERROR: ${manifest} stream '${stream}' cannot take a publish-version override" >&2
+        exit 1
+    fi
+    if [[ -z "${version}" ]]; then
+        echo "[apply-publish-version-override] ERROR: ${manifest} missing .version" >&2
+        exit 1
+    fi
+    suffix="${override#"${version}-"}"
+    if [[ "${override}" != "${version}-${suffix}" || -z "${suffix}" || "${suffix}" == "${override}" ]]; then
+        echo "[apply-publish-version-override] ERROR: override '${override}' must be ${version}-<ci-suffix>" >&2
+        exit 1
+    fi
+    if [[ ! "${suffix}" =~ ^[A-Za-z][A-Za-z0-9]*(\.[A-Za-z0-9]+)*$ ]]; then
+        echo "[apply-publish-version-override] ERROR: override suffix '${suffix}' must be a ci prerelease such as lwci.0" >&2
+        exit 1
+    fi
+    if [[ "${suffix}" == rhlw || "${suffix}" == rhlw.* ]]; then
+        echo "[apply-publish-version-override] ERROR: override suffix '${suffix}' is a remediated publish form" >&2
+        exit 1
+    fi
+done
+
+"${python}" "${script}" "${override}" "${packages[@]}"
+echo "[apply-publish-version-override] scratch validated override applied"
