@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# Write a CycloneDX SBOM for each packed npm tarball and record it under CDX_ROOT.
+#
+# Validated builds record the upstream ancestor and an empty patch list.
+# Remediated and novel builds read Lightwell-Fix trailers from the source tip
+# named by the recipe manifest. A remediated build with no CVE trailer fails.
+# The SPDX document already embedded in the tarball must name the same package.
+#
+# The files are not placed in ARTIFACT_ROOT. create-oci attaches them as
+# referrers (application/vnd.cyclonedx+json) on the npm packages image.
+#
+# Usage: generate-npm-cdx
+# Environment:
+#   SBOM_REPOSITORY_URL   https URL stored as the purl repository_url qualifier
+#   ARTIFACT_ROOT         directory of collected .tgz files (after generate-npm-sbom)
+#   SOURCE_ROOT           recipe checkout (manifest.json per built package)
+#   BUILT_LIST            package dirs, one per line
+#   CDX_ROOT              output directory (default: ${WORKDIR_ROOT}/cdx)
+#   GIT_AUTH_PATH         optional git-auth workspace for private source clones
+set -euo pipefail
+
+_npm_builder_here() {
+    cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+}
+
+_npm_builder_lib() {
+    local name="$1"
+    local here
+    here="$(_npm_builder_here)"
+    if [[ -f "${here}/lib/${name}" ]]; then
+        echo "${here}/lib/${name}"
+    elif [[ -f "${NPM_BUILDER_LIB:-/usr/local/lib/npm-builder}/${name}" ]]; then
+        echo "${NPM_BUILDER_LIB:-/usr/local/lib/npm-builder}/${name}"
+    else
+        echo "[generate-npm-cdx] ERROR: ${name} not found" >&2
+        return 1
+    fi
+}
+
+# shellcheck source=lib/npm-sbom-identity.sh
+source "$(_npm_builder_lib npm-sbom-identity.sh)"
+# shellcheck source=lib/configure-git-auth.sh
+source "$(_npm_builder_lib configure-git-auth.sh)"
+
+if [[ -z "${SBOM_REPOSITORY_URL:-}" ]]; then
+    echo "[generate-npm-cdx] ERROR: SBOM_REPOSITORY_URL is required" >&2
+    exit 1
+fi
+case "${SBOM_REPOSITORY_URL}" in
+    https://*) ;;
+    *)
+        echo "[generate-npm-cdx] ERROR: SBOM_REPOSITORY_URL must be an https URL" >&2
+        exit 1
+        ;;
+esac
+
+WORKDIR_ROOT="${WORKDIR_ROOT:-/var/workdir}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-${WORKDIR_ROOT}/artifact}"
+SOURCE_ROOT="${SOURCE_ROOT:-${WORKDIR_ROOT}/source}"
+BUILT_LIST="${BUILT_LIST:-${WORKDIR_ROOT}/built/list.txt}"
+CDX_ROOT="${CDX_ROOT:-${WORKDIR_ROOT}/cdx}"
+WRITER="$(_npm_builder_lib write_npm_cdx.py)"
+
+if [[ ! -d "${ARTIFACT_ROOT}" ]]; then
+    echo "[generate-npm-cdx] ERROR: missing artifact dir ${ARTIFACT_ROOT}" >&2
+    exit 1
+fi
+if [[ ! -s "${BUILT_LIST}" ]]; then
+    echo "[generate-npm-cdx] ERROR: built list is empty (${BUILT_LIST})" >&2
+    exit 1
+fi
+
+rm -rf "${CDX_ROOT}"
+mkdir -p "${CDX_ROOT}"
+
+# One Lightwell-Fix id per trailer line: cve= when it is a CVE/LW id, else fix=.
+# Subject text and branch names are ignored.
+parse_lightwell_fix_ids() {
+    local message="$1"
+    CDX_MESSAGE="${message}" python3 - <<'PY'
+import os
+import re
+
+text = os.environ.get("CDX_MESSAGE", "")
+vuln = re.compile(r"\b(?:CVE|LW)-\d{4}-\d{4,7}\b")
+seen = set()
+for raw in text.splitlines():
+    line = raw.strip()
+    if not line.lower().startswith("lightwell-fix:"):
+        continue
+    fields = {}
+    for pair in line.split(":", 1)[1].split(","):
+        if "=" not in pair:
+            continue
+        key, value = pair.split("=", 1)
+        fields[key.strip().lower()] = value.strip()
+    chosen = ""
+    for key in ("cve", "fix"):
+        found = vuln.findall(fields.get(key, ""))
+        if found:
+            chosen = found[0]
+            break
+    if chosen and chosen not in seen:
+        seen.add(chosen)
+        print(chosen)
+PY
+}
+
+commit_url() {
+    local remote="$1"
+    local sha="$2"
+    remote="${remote%.git}"
+    remote="${remote%/}"
+    case "${remote}" in
+        git@gitlab.cee.redhat.com:*)
+            remote="https://gitlab.cee.redhat.com/${remote#git@gitlab.cee.redhat.com:}"
+            remote="${remote%.git}"
+            printf '%s/-/commit/%s\n' "${remote}" "${sha}"
+            ;;
+        *gitlab.cee.redhat.com*)
+            printf '%s/-/commit/%s\n' "${remote}" "${sha}"
+            ;;
+        *github.com*)
+            printf '%s/commit/%s\n' "${remote}" "${sha}"
+            ;;
+        *)
+            printf '%s/commit/%s\n' "${remote}" "${sha}"
+            ;;
+    esac
+}
+
+# Print "<sha>\n<message>" by cloning the manifest source ref.
+# Depth 1 is enough: ADR-0005 carries the full fix list on the tip commit.
+read_source_tip() {
+    local url="$1"
+    local ref="$2"
+    local dest sha
+    dest="$(mktemp -d)"
+    if ! git -c advice.detachedHead=false clone -q --depth 1 --branch "${ref}" "${url}" "${dest}"; then
+        rm -rf "${dest}"
+        dest="$(mktemp -d)"
+        git init -q "${dest}"
+        git -C "${dest}" remote add origin "${url}"
+        git -C "${dest}" fetch -q --depth 1 origin "${ref}"
+        git -C "${dest}" checkout -q FETCH_HEAD
+    fi
+    sha="$(git -C "${dest}" rev-parse HEAD)"
+    printf '%s\n' "${sha}"
+    git -C "${dest}" log -1 --format=%B
+    rm -rf "${dest}"
+}
+
+needs_source=0
+while IFS= read -r pkg; do
+    [[ -n "${pkg}" ]] || continue
+    stream="$(jq -r '.stream // empty' "${SOURCE_ROOT}/${pkg}/manifest.json")"
+    case "${stream}" in
+        remediated|novel) needs_source=1 ;;
+    esac
+done < "${BUILT_LIST}"
+if [[ "${needs_source}" -eq 1 ]]; then
+    configure_git_for_private_source
+fi
+
+written=0
+while IFS= read -r pkg; do
+    [[ -n "${pkg}" ]] || continue
+    manifest="${SOURCE_ROOT}/${pkg}/manifest.json"
+    if [[ ! -f "${manifest}" ]]; then
+        echo "[generate-npm-cdx] ERROR: missing manifest ${manifest}" >&2
+        exit 1
+    fi
+    stream="$(jq -r '.stream // empty' "${manifest}")"
+    manifest_name="$(jq -r '.name // empty' "${manifest}")"
+    upstream_version="$(jq -r '.upstream.version // empty' "${manifest}")"
+    source_url="$(jq -r '.source.url // empty' "${manifest}")"
+    source_ref="$(jq -r '.source.ref // empty' "${manifest}")"
+    if [[ -z "${stream}" || -z "${manifest_name}" || -z "${upstream_version}" ]]; then
+        echo "[generate-npm-cdx] ERROR: ${pkg} manifest missing stream, name, or upstream.version" >&2
+        exit 1
+    fi
+    case "${stream}" in
+        validated|remediated|novel) ;;
+        *)
+            echo "[generate-npm-cdx] ERROR: ${pkg} has unsupported stream ${stream}" >&2
+            exit 1
+            ;;
+    esac
+
+    vuln_ids=""
+    diff_url=""
+    if [[ "${stream}" != "validated" ]]; then
+        if [[ -z "${source_url}" || -z "${source_ref}" ]]; then
+            echo "[generate-npm-cdx] ERROR: ${pkg} ${stream} manifest missing source.url or source.ref" >&2
+            exit 1
+        fi
+        tip="$(read_source_tip "${source_url}" "${source_ref}")"
+        sha="${tip%%$'\n'*}"
+        message="${tip#*$'\n'}"
+        diff_url="$(commit_url "${source_url}" "${sha}")"
+        vuln_ids="$(parse_lightwell_fix_ids "${message}")"
+        if [[ "${stream}" == "remediated" ]]; then
+            if ! grep -q '^CVE-' <<<"${vuln_ids}"; then
+                echo "[generate-npm-cdx] ERROR: ${pkg} remediated source tip has no Lightwell-Fix CVE" >&2
+                exit 1
+            fi
+        elif [[ -z "${vuln_ids}" ]]; then
+            echo "[generate-npm-cdx] ERROR: ${pkg} novel source tip has no Lightwell-Fix id" >&2
+            exit 1
+        fi
+        echo "[generate-npm-cdx] ${pkg} ${stream} fixes: ${vuln_ids//$'\n'/, }"
+    fi
+
+    ancestor_purl="$(npm_sbom_purl "${manifest_name}" "${upstream_version}")"
+    matched=0
+    while IFS= read -r tgz; do
+        [[ -n "${tgz}" ]] || continue
+        pkg_json="$(tar -xOf "${tgz}" package/package.json 2>/dev/null || true)"
+        [[ -n "${pkg_json}" ]] || continue
+        packed_name="$(jq -r '.name // empty' <<<"${pkg_json}")"
+        packed_version="$(jq -r '.version // empty' <<<"${pkg_json}")"
+        if [[ "${packed_name}" != "${manifest_name}" ]]; then
+            continue
+        fi
+        if [[ -z "${packed_version}" ]]; then
+            echo "[generate-npm-cdx] ERROR: ${tgz} package.json missing version" >&2
+            exit 1
+        fi
+        spdx_file="$(mktemp)"
+        if ! tar -xOf "${tgz}" package/sboms/redhat.spdx.json >"${spdx_file}" 2>/dev/null; then
+            echo "[generate-npm-cdx] ERROR: ${tgz} missing package/sboms/redhat.spdx.json" >&2
+            rm -f "${spdx_file}"
+            exit 1
+        fi
+        base_purl="$(npm_sbom_purl "${packed_name}" "${packed_version}")"
+        if ! npm_sbom_identity_ok "${spdx_file}" "${packed_name}" "${packed_version}"; then
+            echo "[generate-npm-cdx] ERROR: SPDX identity does not match ${packed_name}@${packed_version} in ${tgz}" >&2
+            rm -f "${spdx_file}"
+            exit 1
+        fi
+        # Name/version can satisfy the SPDX helper while a purl still disagrees.
+        # The CycloneDX purl base has to be that same SPDX purl, without qualifiers.
+        if ! jq -e --arg name "${packed_name}" --arg version "${packed_version}" --arg purl "${base_purl}" '
+            [.packages[]?
+              | select(.name == $name and .versionInfo == $version)
+              | (.externalRefs // [])[]?
+              | select(.referenceType == "purl")
+              | .referenceLocator
+              | split("?")[0]
+            ] as $bases
+            | ($bases | length) == 0 or any($bases[]; . == $purl)
+          ' "${spdx_file}" >/dev/null
+        then
+            echo "[generate-npm-cdx] ERROR: SPDX purl base does not match ${base_purl} in ${tgz}" >&2
+            rm -f "${spdx_file}"
+            exit 1
+        fi
+        rm -f "${spdx_file}"
+
+        safe_pkg="${pkg//\//__}"
+        base_name="$(basename "${tgz}" .tgz)"
+        out="${CDX_ROOT}/${safe_pkg}__${base_name}.cdx.json"
+        CDX_NAME="${packed_name}" \
+        CDX_VERSION="${packed_version}" \
+        CDX_UPSTREAM_VERSION="${upstream_version}" \
+        CDX_BASE_PURL="${base_purl}" \
+        CDX_ANCESTOR_PURL="${ancestor_purl}" \
+        CDX_REPOSITORY_URL="${SBOM_REPOSITORY_URL}" \
+        CDX_STREAM="${stream}" \
+        CDX_DIFF_URL="${diff_url}" \
+        CDX_VULN_IDS="${vuln_ids}" \
+            python3 "${WRITER}" "${out}"
+        echo "[generate-npm-cdx] wrote ${out} (${packed_name}@${packed_version}, ${stream})"
+        matched=1
+        written=$((written + 1))
+    done < <(find "${ARTIFACT_ROOT}" -type f -name '*.tgz' | LC_ALL=C sort)
+
+    if [[ "${matched}" -eq 0 ]]; then
+        echo "[generate-npm-cdx] ERROR: no tarball in ${ARTIFACT_ROOT} matches ${manifest_name}" >&2
+        exit 1
+    fi
+done < "${BUILT_LIST}"
+
+tgz_count="$(find "${ARTIFACT_ROOT}" -type f -name '*.tgz' | wc -l | tr -d ' ')"
+if [[ "${written}" -ne "${tgz_count}" ]]; then
+    echo "[generate-npm-cdx] ERROR: wrote ${written} CycloneDX document(s) for ${tgz_count} tarball(s)" >&2
+    exit 1
+fi
+chmod -R a+rX "${CDX_ROOT}"
+echo "[generate-npm-cdx] wrote ${written} CycloneDX SBOM(s) under ${CDX_ROOT}"

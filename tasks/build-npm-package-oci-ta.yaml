@@ -15,8 +15,11 @@ spec:
   description: >-
     Build npm Trusted Libraries packages from onboarding recipes, generate an
     SPDX SBOM (Syft → redhat.spdx.json, enriched with npm name/version/purl),
-    and push an OCI artifact to Quay (mirrors build-python-wheels: SBOM at
-    build; attestations at release).
+    write a CycloneDX SBOM whose name/version/purl base matches that SPDX
+    identity, and push an OCI artifact to Quay. The CycloneDX document is
+    attached as an application/vnd.cyclonedx+json referrer. Validated builds
+    record an empty patch list. Remediated and novel builds fill
+    pedigree.patches from Lightwell-Fix trailers on the source tip.
     Optional Pulp Stage when PUBLISH_TO_PULP=true.
   params:
     - name: PACKAGES
@@ -50,6 +53,12 @@ spec:
       description: When true, npm publish to Pulp Stage (requires stage secret)
       type: string
       default: "false"
+    - name: SBOM_REPOSITORY_URL
+      description: >-
+        https URL written as the CycloneDX purl repository_url qualifier.
+        Validated targets pass the Lightwell npm content URL. Remediated
+        targets pass the remediated distribution URL.
+      type: string
     - name: LIGHTWELL_PUBLISH_VERSION_OVERRIDE
       description: >-
         Version to publish instead of manifest.version (e.g.
@@ -149,12 +158,24 @@ spec:
           memory: 512Mi
     - name: generate-sbom
       image: $(params.BUILDER_IMAGE)
+      env:
+        - name: GIT_AUTH_PATH
+          value: $(workspaces.git-auth.path)
+        - name: SBOM_REPOSITORY_URL
+          value: $(params.SBOM_REPOSITORY_URL)
+      volumeMounts:
+        - mountPath: /mnt/trusted-ca
+          name: trusted-ca
+          readOnly: true
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
         ARTIFACT_ROOT="${ARTIFACT_ROOT:-${WORKDIR_ROOT}/artifact}"
         # Embed SPDX (Syft → package/sboms/redhat.spdx.json) into every collected .tgz.
         generate-npm-sbom "${ARTIFACT_ROOT}"
+        # CycloneDX referrer. Validated patches stay empty; remediated/novel
+        # read Lightwell-Fix trailers from manifest source.
+        generate-npm-cdx
       computeResources:
         limits:
           memory: 1Gi
@@ -233,6 +254,29 @@ spec:
         echo -n "$IMAGE" | tee "$(results.IMAGE_URL.path)"
         echo -n "$RESULTING_DIGEST" | tee "$(results.IMAGE_DIGEST.path)"
         echo -n "${IMAGE}@${RESULTING_DIGEST}" | tee "$(results.IMAGE_REF.path)"
+
+        CDX_ROOT="${CDX_ROOT:-${WORKDIR_ROOT}/cdx}"
+        shopt -s nullglob
+        cdx_files=("${CDX_ROOT}"/*.cdx.json)
+        if [[ ${#cdx_files[@]} -eq 0 ]]; then
+          echo "No CycloneDX SBOM to attach under ${CDX_ROOT}" >&2
+          exit 1
+        fi
+        CDX_EXPIRE=()
+        [ -n "$IMAGE_EXPIRES_AFTER" ] && CDX_EXPIRE=("--annotation" "quay.expires-after=${IMAGE_EXPIRES_AFTER}")
+        for cdx in "${cdx_files[@]}"; do
+          echo "Attaching CycloneDX SBOM ${cdx} to ${IMAGE}@${RESULTING_DIGEST}"
+          if ! retry oras attach \
+            --registry-config "${AUTHFILE}" \
+            "${CDX_EXPIRE[@]}" \
+            --artifact-type "application/vnd.cyclonedx+json" \
+            "${IMAGE}@${RESULTING_DIGEST}" \
+            "${cdx}:application/vnd.cyclonedx+json"
+          then
+            echo "Failed to attach CycloneDX SBOM ${cdx}" >&2
+            exit 1
+          fi
+        done
 
         echo "[$(date --utc -Ins)] End create-oci-artifact"
       computeResources:

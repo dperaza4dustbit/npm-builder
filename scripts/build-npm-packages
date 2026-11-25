@@ -24,52 +24,20 @@ Environment:
 EOF
 }
 
-configure_git_for_private_source() {
-    # Corporate CAs (gitlab.cee.redhat.com) — same pattern as python source-to-sdist.
-    # Task mounts trusted-ca at /mnt/trusted-ca when present.
-    for ca in /mnt/trusted-ca/ca-bundle.crt /etc/pki/tls/certs/ca-custom-bundle.crt; do
-        if [[ -s "${ca}" ]]; then
-            export GIT_SSL_CAINFO="${ca}"
-            export SSL_CERT_FILE="${ca}"
-            echo "[build-npm-packages] using CA bundle ${ca}"
-            break
-        fi
-    done
-
-    # Optional git-auth workspace for private Lightwell mirror clones.
-    # Use GIT_CONFIG_GLOBAL + an explicit store file so we do not override HOME.
-    if [[ -z "${GIT_AUTH_PATH:-}" || ! -d "${GIT_AUTH_PATH}" ]]; then
-        return 0
-    fi
-
-    local git_config_dir creds_file
-    git_config_dir="$(mktemp -d)"
-    chmod 700 "${git_config_dir}"
-    export GIT_CONFIG_GLOBAL="${git_config_dir}/.gitconfig"
-    creds_file="${git_config_dir}/.git-credentials"
-
-    if [[ -f "${GIT_AUTH_PATH}/.gitconfig" ]]; then
-        cp -f "${GIT_AUTH_PATH}/.gitconfig" "${GIT_CONFIG_GLOBAL}"
-    fi
-    # Pin store to our temp file (overrides any helper from a copied .gitconfig).
-    git config --global credential.helper "store --file=${creds_file}"
-
-    if [[ -f "${GIT_AUTH_PATH}/.git-credentials" ]]; then
-        cp -f "${GIT_AUTH_PATH}/.git-credentials" "${creds_file}"
-        echo "[build-npm-packages] configured git credentials from git-auth workspace"
-        return 0
-    fi
-
-    # username/password secret → git credential store (git encodes the file itself).
-    if [[ -f "${GIT_AUTH_PATH}/username" && -f "${GIT_AUTH_PATH}/password" ]]; then
-        local user pass
-        user="$(tr -d '\n' <"${GIT_AUTH_PATH}/username")"
-        pass="$(tr -d '\n' <"${GIT_AUTH_PATH}/password")"
-        printf 'protocol=https\nhost=gitlab.cee.redhat.com\nusername=%s\npassword=%s\n\n' \
-            "${user}" "${pass}" | git credential approve
-        echo "[build-npm-packages] configured git credentials from username/password"
+_configure_git_auth_lib() {
+    local here
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -f "${here}/lib/configure-git-auth.sh" ]]; then
+        echo "${here}/lib/configure-git-auth.sh"
+    elif [[ -f "${NPM_BUILDER_LIB:-/usr/local/lib/npm-builder}/configure-git-auth.sh" ]]; then
+        echo "${NPM_BUILDER_LIB:-/usr/local/lib/npm-builder}/configure-git-auth.sh"
+    else
+        echo "configure-git-auth.sh not found" >&2
+        return 1
     fi
 }
+# shellcheck source=lib/configure-git-auth.sh
+source "$(_configure_git_auth_lib)"
 
 # shellcheck source=npm-workdir-load.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/npm-workdir-load.sh"
